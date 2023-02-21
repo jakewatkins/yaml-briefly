@@ -1,0 +1,169 @@
+trigger:
+  paths:
+    include:
+      - develop
+
+  branches:
+    include:
+      - develop
+      - release/*
+
+pool:
+    vmImage: 'windows-latest'
+
+variables:
+    allSolution: 'src/theApp.sln'
+    apiSolution: 'src/theApp.API.sln'
+    buildPlatform: 'Any CPU'
+    buildConfiguration: 'Release'
+    apiArtifactName: 'theApp.API'
+    iacArtifactName: 'theApp.IaC'
+    artifactPath: './src/publish'
+
+stages:
+- stage: Build_iac_packages
+  jobs:
+  - job: Dump_artifacts
+    steps:
+    #dump the stuff in the repo
+    - task: PowerShell@2
+      displayName: dump files in repo
+      inputs:
+        targetType: 'inline'
+        script: get-childitem -path $(Build.SourcesDirectory) -Recurse
+  - job: Build_IaC
+    steps:
+    #clean up the source directory
+    - task: DeleteFiles@1
+      displayName: 'remove GIT folder'
+      inputs:
+        removeDotFiles: true
+        sourceFolder: $(build.SourcesDirectory)
+        contents: |
+          **/.git
+  
+    - task: CopyFiles@2
+      displayName: copy IaC files
+      inputs:
+          sourceFolder: $(build.SourcesDirectory)\terraform
+          contents: '**'
+          targetFolder: $(build.artifactsstagingdirectory)\terraform
+    
+    # Publish Terraform
+    - task: PublishBuildArtifacts@1
+      displayName: publish
+      inputs:
+          pathtoPublish: $(build.artifactsstagingdirectory)/terraform
+          artifactName: theApp-iac
+          publishLocation: Container
+
+    # Publish release file
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact: Release file'
+      inputs:
+        PathtoPublish: $(build.artifactsstagingdirectory)/Release
+        ArtifactName: Release
+        publishLocation: Container
+
+- stage: Build_API_package 
+  jobs: 
+  - job: Build_API
+    steps:
+    - task: DotNetCoreCLI@2
+      displayName: New Manifest for tool
+      inputs:
+        command: custom
+        custom: 'new '
+        arguments: tool-manifest
+
+    - task: NuGetToolInstaller@1
+      inputs:
+        versionSpec: 5.8
+        checkLatest: true
+
+    - task: NuGetCommand@2
+      inputs:
+        command: 'restore'
+        restoreSolution: '$(allSolution)'
+
+    - task: UseDotNet@2
+      inputs:
+        version: '6.0.x'
+        includePreviewVersions: true
+
+    - task: VSBuild@1
+      inputs:
+        solution: '$(apiSolution)'
+        vsVersion: 'latest'
+        platform: $(buildPlatform)
+        configuration: $(buildConfiguration)
+        clean: true
+        includeNuGetOrg: true
+        msbuildArchitecture: 'x64'
+        createLogFile: false
+        logFileVerbosity: 'normal'
+        msbuildArgs: '/target:Publish /p:OutDir=$(artifactPath)'
+
+    - task: PublishPipelineArtifact@1
+      inputs:
+          targetPath: './src/API/theApp.Api/bin/Release/net6.0/publish'
+          artifactName: '$(apiArtifactName)'
+  
+- stage: Unit_Test_Solution
+  jobs:
+  - job: Run_Unit_Tests
+    steps:
+    - task: DotNetCoreCLI@2
+      displayName: New Manifest for tool
+      inputs:
+        command: custom
+        custom: 'new '
+        arguments: tool-manifest
+
+    - task: NuGetToolInstaller@1
+      inputs:
+        versionSpec: 5.8
+        checkLatest: true
+
+    - task: NuGetCommand@2
+      inputs:
+        command: 'restore'
+        restoreSolution: '$(allSolution)'
+
+    - task: UseDotNet@2
+      inputs:
+        version: '6.0.x'
+        includePreviewVersions: true
+
+    - task: VSBuild@1
+      inputs:
+        solution: '$(allSolution)'
+        vsVersion: 'latest'
+        platform: $(buildPlatform)
+        configuration: $(buildConfiguration)
+        clean: true
+        includeNuGetOrg: true
+        msbuildArchitecture: 'x64'
+        createLogFile: false
+        logFileVerbosity: 'normal'
+        msbuildArgs: '/target:Publish /p:OutDir=$(artifactPath)'
+
+    - task: VSTest@2
+      displayName: run unit tests
+      inputs:
+        testSelector: 'testAssemblies'
+        testAssemblyVer2: |
+          **\$(buildConfiguration)\**\*Test.dll 
+          **\*Tests.dll 
+          !**\obj\** 
+          !**\ref\** 
+          !**\xunit.runner.visualstudio.testadapter.dll
+          !**\xunit.runner.visualstudio.dotnetcore.testadapter.dll
+        codeCoverageEnabled: true
+        testRunTitle: '$(Build.DefinitionName) | $(Build.Reason) |$(Build.SourceVersion)'
+        platform: '$(buildPlatform)'
+        configuration: '$(buildConfiguration)'
+        failOnMinTestsNotRun: false
+        minimumExpectedTests: 1
+      continueOnError: true
+      
